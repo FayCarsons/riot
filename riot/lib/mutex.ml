@@ -9,11 +9,15 @@ and status = Locked of Pid.t | Unlocked
 
 type error = [ `multiple_unlocks | `locked | `not_owner | `process_died ]
 
-let pp_err = function
-  | `multiple_unlocks -> "Mutex received multiple unlock messages"
-  | `locked -> "Mutex is locked"
-  | `not_owner -> "Process does not own mutex"
-  | `process_died -> "Mutex process died"
+let pp_err ppf error =
+  let reason =
+    match error with
+    | `multiple_unlocks -> "Mutex received multiple unlock messages"
+    | `locked -> "Mutex is locked"
+    | `not_owner -> "Process does not own mutex"
+    | `process_died -> "Mutex process died"
+  in
+  Format.fprintf ppf "Mutex error: %s" reason
 
 type Message.t +=
   | Lock of Pid.t
@@ -78,10 +82,10 @@ let selector = function
 let wait_lock mutex =
   monitor mutex.process;
   send mutex.process @@ Lock (self ());
-  match receive ~selector () with
+  match[@warning "-8"] receive ~selector () with
   | Monitor (Process_down _) -> Error `process_died
   | Failed reason -> Error reason
-  | _ -> Ok ()
+  | LockAccepted -> Ok ()
 
 let try_wait_lock mutex =
   monitor mutex.process;
@@ -94,12 +98,12 @@ let try_wait_lock mutex =
 let wait_unlock mutex =
   send mutex.process @@ Unlock (self ());
   match[@warning "-8"] receive ~selector () with
+  | UnlockAccepted -> Ok ()
   | Failed reason -> Error reason
   | Monitor (Process_down _) -> Error `process_died
-  | UnlockAccepted -> Ok ()
 
 (* NOTE: (@faycarsons) Assuming that we do want functions like `get` to return
-   a copy of the wrapped value, to prevent mutation once the mutex has been
+   a copy of the wrapped value to prevent mutation once the mutex has been
    unlocked: I'm not sure how we want to go about that copying. There are maybe
    cheaper but less safe solutions using `Obj`, but if the serialization cost
    is OK this seems to work fine *)

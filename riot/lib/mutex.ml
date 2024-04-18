@@ -48,17 +48,20 @@ let rec loop ({ status; queue } as state) =
       Logger.error (fun f ->
           f "Mutex (PID: %a) received unlock message while unlocked" Pid.pp
             (self ()));
-      send not_owner @@ Failed `multiple_unlocks
+      send not_owner @@ Failed `multiple_unlocks;
+      loop state
   | Unlock not_owner ->
       Logger.error (fun f ->
           f "Mutex (PID: %a) received unlock message from non-owner process"
             Pid.pp (self ()));
-      send not_owner @@ Failed `not_owner
+      send not_owner @@ Failed `not_owner;
+      loop state
   | Monitor (Process_down fell_pid) when status = Locked fell_pid ->
       Logger.error (fun f -> f "Mutex owner crashed: %a" Pid.pp fell_pid);
-      loop { state with status = Unlocked }
+      check_queue { state with status = Unlocked }
   | _ ->
-      Logger.debug (fun f -> f "Mutex received unexpected message");
+      Logger.debug (fun f ->
+          f "Mutex (PID: %a) received unexpected message" Pid.pp (self ()));
       loop state
 
 and check_queue ({ queue; _ } as state) =

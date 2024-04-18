@@ -25,23 +25,23 @@ let pp_err fmt error =
 type Message.t +=
   | Lock of Pid.t
   | Unlock of Pid.t
-  | TryLock of Pid.t
-  | LockAccepted
-  | UnlockAccepted
+  | Try_lock of Pid.t
+  | Lock_accepted
+  | Unlock_accepted
   | Failed of error
 
 let rec loop ({ status; queue } as state) =
   match receive_any () with
-  | (Lock owner | TryLock owner) when status = Unlocked ->
+  | (Lock owner | Try_lock owner) when status = Unlocked ->
       monitor owner;
-      send owner LockAccepted;
+      send owner Lock_accepted;
       loop { state with status = Locked owner }
   | Lock requesting ->
       Lf_queue.push queue requesting;
       loop state
-  | TryLock requesting -> send requesting @@ Failed `locked
+  | Try_lock requesting -> send requesting @@ Failed `locked
   | Unlock pid when status = Locked pid ->
-      send pid UnlockAccepted;
+      send pid Unlock_accepted;
       demonitor pid;
       check_queue { state with status = Unlocked }
   | Unlock not_owner when status = Unlocked ->
@@ -64,7 +64,7 @@ let rec loop ({ status; queue } as state) =
 and check_queue ({ queue; _ } as state) =
   match Lf_queue.pop queue with
   | Some pid ->
-      send pid LockAccepted;
+      send pid Lock_accepted;
       monitor pid;
       loop { state with status = Locked pid }
   | None -> loop state
@@ -75,7 +75,7 @@ let create inner =
   { inner; process }
 
 let selector = function
-  | (LockAccepted | UnlockAccepted | Failed _ | Monitor (Process_down _)) as m
+  | (Lock_accepted | Unlock_accepted | Failed _ | Monitor (Process_down _)) as m
     ->
       `select m
   | _ -> `skip
@@ -88,20 +88,20 @@ let wait_lock mutex =
   match[@warning "-8"] receive ~selector () with
   | Monitor (Process_down _) -> Error `process_died
   | Failed reason -> Error reason
-  | LockAccepted -> Ok ()
+  | Lock_accepted -> Ok ()
 
 let try_wait_lock mutex =
   monitor mutex.process;
-  send mutex.process @@ TryLock (self ());
+  send mutex.process @@ Try_lock (self ());
   match[@warning "-8"] receive ~selector () with
-  | LockAccepted -> Ok ()
+  | Lock_accepted -> Ok ()
   | Failed reason -> Error reason
   | Monitor (Process_down _) -> Error `process_died
 
 let wait_unlock mutex =
   send mutex.process @@ Unlock (self ());
   match[@warning "-8"] receive ~selector () with
-  | UnlockAccepted -> Ok ()
+  | Unlock_accepted -> Ok ()
   | Failed reason -> Error reason
   | Monitor (Process_down _) -> Error `process_died
 

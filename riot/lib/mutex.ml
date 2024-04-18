@@ -7,9 +7,12 @@ type 'a t = { mutable inner : 'a; process : Pid.t }
 type state = { status : status; queue : Pid.t Lf_queue.t }
 and status = Locked of Pid.t | Unlocked
 
+let pp fmt inner_pp mutex =
+  Format.fprintf fmt "Mutex<inner: %a>" inner_pp mutex.inner
+
 type error = [ `multiple_unlocks | `locked | `not_owner | `process_died ]
 
-let pp_err ppf error =
+let pp_err fmt error =
   let reason =
     match error with
     | `multiple_unlocks -> "Mutex received multiple unlock messages"
@@ -17,7 +20,7 @@ let pp_err ppf error =
     | `not_owner -> "Process does not own mutex"
     | `process_died -> "Mutex process died"
   in
-  Format.fprintf ppf "Mutex error: %s" reason
+  Format.fprintf fmt "Mutex error: %s" reason
 
 type Message.t +=
   | Lock of Pid.t

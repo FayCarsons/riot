@@ -914,6 +914,7 @@ module Mutex : sig
   type 'a t
   type error
 
+  val pp : Format.formatter -> (Format.formatter -> 'a -> unit) -> 'a t -> unit
   val pp_err : Format.formatter -> error -> unit
   val create : 'a -> 'a t
   val lock : 'a t -> ('a -> 'a) -> (unit, error) result

@@ -924,6 +924,7 @@ module Mutex : sig
   val get : 'a t -> ('a, error) result
   val try_get : 'a t -> ('a, error) result
   val unsafe_get : 'a t -> 'a
+  val unsafe_set : 'a t -> 'a -> unit
 end
 
 module Stream : sig

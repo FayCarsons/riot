@@ -139,13 +139,16 @@ let try_iter mutex fn =
 
 let get mutex =
   let* _ = wait_lock mutex in
+  let inner = clone mutex.inner in
   let* _ = wait_unlock mutex in
-  Result.ok @@ clone mutex.inner
+  Ok inner
 
 let try_get mutex =
   let* _ = try_wait_lock mutex in
+  let inner = clone mutex.inner in
   let* _ = wait_unlock mutex in
-  Result.ok @@ clone mutex.inner
+  Ok inner
 
 (* NOTE: (@faycarsons) not sure if we want this? *)
-let unsafe_get t = t.inner
+let unsafe_get mutex = mutex.inner
+let unsafe_set mutex inner = mutex.inner <- inner

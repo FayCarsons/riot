@@ -66,16 +66,11 @@ let rec loop ({ status; queue } as state) =
 
 and check_queue ({ queue; _ } as state) =
   match Lf_queue.pop queue with
-  | Some pid ->
-      send pid Lock_accepted;
-      monitor pid;
-      loop { state with status = Locked pid }
+  | Some owner ->
+      send owner Lock_accepted;
+      monitor owner;
+      loop { state with status = Locked owner }
   | None -> loop state
-
-let create inner =
-  let state = { status = Unlocked; queue = Lf_queue.create () } in
-  let process = spawn_link @@ fun () -> loop state in
-  { inner; process }
 
 let selector = function
   | (Lock_accepted | Unlock_accepted | Failed _ | Monitor (Process_down _)) as m
@@ -85,7 +80,7 @@ let selector = function
 
 (* NOTE: (@faycarsons) Monitoring should(?) prevent deadlocks caused by mutex
     process dying *)
-let wait_lock mutex =
+let wait_lock mutex : (unit, [> error ]) result =
   monitor mutex.process;
   send mutex.process @@ Lock (self ());
   match[@warning "-8"] receive ~selector () with
@@ -119,6 +114,13 @@ let clone (inner : 'a) : 'a =
   from_bytes ser 0
 
 (* Exposed API *)
+
+let create inner =
+  let state = { status = Unlocked; queue = Lf_queue.create () } in
+  let process = spawn_link @@ fun () -> loop state in
+  { inner; process }
+
+let drop mutex = exit mutex.process Process.Normal
 
 let lock mutex fn =
   let* _ = wait_lock mutex in

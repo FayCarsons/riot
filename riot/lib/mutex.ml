@@ -78,8 +78,7 @@ let selector = function
       `select m
   | _ -> `skip
 
-(* NOTE: (@faycarsons) Monitoring should(?) prevent deadlocks caused by mutex
-    process dying *)
+(* Monitor mutex process to catch crashes *)
 let wait_lock mutex : (unit, [> error ]) result =
   monitor mutex.process;
   send mutex.process @@ Lock (self ());
@@ -99,7 +98,9 @@ let try_wait_lock mutex =
 let wait_unlock mutex =
   send mutex.process @@ Unlock (self ());
   match[@warning "-8"] receive ~selector () with
-  | Unlock_accepted -> Ok ()
+  | Unlock_accepted ->
+      demonitor mutex.process;
+      Ok ()
   | Failed reason -> Error reason
   | Monitor (Process_down _) -> Error `process_died
 

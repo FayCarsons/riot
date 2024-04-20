@@ -1,7 +1,7 @@
 open Global
 open Util
 open Process.Messages
-module Reader_set = Set.Make (Pid)
+module Pid_set = Set.Make (Pid)
 
 type internal = {
   mutable reader_count : int;
@@ -11,10 +11,12 @@ type internal = {
   write_queue : Pid.t Lf_queue.t;
 }
 
-and state = Reading of Reader_set.t | Writing of Pid.t | Unlocked
+and state = Reading of Pid_set.t | Writing of Pid.t | Unlocked
 
 type 'a t = { mutable inner : 'a; process : Pid.t }
-type error = [ `not_owner | `multiple_unlocks | `locked | `process_died ]
+
+type error =
+  [ `not_owner | `multiple_unlocks | `locked | `process_died | `invalid_message ]
 
 (* Process *)
 
@@ -23,74 +25,89 @@ type Message.t +=
   | Locked
   | Lock_accepted
   | Write of Pid.t
+  | Try of [ `read | `write ] * Pid.t
   | Unlock of Pid.t
   | Unlock_accepted
   | Failed of error
 
-let rec loop ({ reader_count; status; read_queue; write_queue } as state) =
-  match[@warning "-8"] (receive_any (), status) with
-  | Read reader, Reading readers ->
+let rec loop state =
+  match[@warning "-8"] receive_any () with
+  | Read reader -> handle_read state reader
+  | Write writer -> handle_write state writer
+  | Try (action, pid) -> handle_try state pid action
+  | Unlock pid -> handle_unlock state pid
+  | Monitor (Process_down fell_pid) -> handle_proc_down state fell_pid
+
+and handle_read ({ reader_count; read_queue; status; _ } as state) reader =
+  match status with
+  | Reading readers ->
       monitor reader;
       send reader Lock_accepted;
       state.reader_count <- succ reader_count;
-      let status = Reading (Reader_set.add reader readers) in
+      let status = Reading (Pid_set.add reader readers) in
       loop { state with status }
-  | Read reader, Unlocked ->
+  | Unlocked ->
       monitor reader;
       send reader Lock_accepted;
       state.reader_count <- succ reader_count;
-      let readers = Reader_set.of_list [ reader ] in
+      let readers = Pid_set.of_list [ reader ] in
       loop { state with status = Reading readers }
-  | Read reader, Writing _ ->
-      send reader Locked;
+  | Writing _ ->
       Lf_queue.push read_queue reader;
       loop state
-  | Write writer, Unlocked ->
+
+and handle_write ({ write_queue; status; _ } as state) writer =
+  match status with
+  | Unlocked ->
       monitor writer;
       send writer Lock_accepted;
       loop { state with status = Writing writer }
-  | Write writer, Reading _ | Write writer, Writing _ ->
-      send writer Locked;
+  | _ ->
       Lf_queue.push write_queue writer;
       loop state
-  | Unlock reader, Reading readers ->
-      if Reader_set.mem reader readers then (
-        send reader Unlock_accepted;
-        demonitor reader;
-        state.reader_count <- pred reader_count;
-        if state.reader_count = 0 then
-          check_queues { state with status = Unlocked }
-        else
-          let status = Reading (Reader_set.remove reader readers) in
-          loop { state with status })
-      else Logger.error (fun f -> f "RWLock received invalid unlock");
-      send reader @@ Failed `not_owner;
-      loop state
-  | Unlock writer, Writing current when Pid.equal writer current ->
-      send writer Unlock_accepted;
-      demonitor writer;
+
+and handle_try ({ status; reader_count; _ } as state) pid = function
+  | `read when reader_count = 0 && status <> Unlocked -> send pid @@ Locked
+  | `read -> handle_read state pid
+  | `write when status <> Unlocked -> send pid @@ Locked
+  | `write -> handle_write state pid
+
+and handle_unlock ({ reader_count; status; _ } as state) pid =
+  match status with
+  | Reading readers when Pid_set.mem pid readers ->
+      send pid Unlock_accepted;
+      demonitor pid;
+      state.reader_count <- pred reader_count;
+      if state.reader_count = 0 then
+        check_queues { state with status = Unlocked }
+      else
+        let status = Reading (Pid_set.remove pid readers) in
+        loop { state with status }
+  | Writing current when Pid.equal pid current ->
+      send pid Unlock_accepted;
+      demonitor pid;
       check_queues state
-  | Unlock writer, Writing _ ->
-      Logger.error (fun f -> f "RWLock received invalid unlock");
-      send writer @@ Failed `not_owner;
-      loop state
-  | Unlock pid, Unlocked ->
+  | Unlocked ->
       Logger.error (fun f -> f "RWLock received multiple unlocks");
       send pid @@ Failed `multiple_unlocks;
       loop state
-  | Monitor (Process_down fell_pid), _ -> (
-      match status with
-      | Reading readers when Reader_set.mem fell_pid readers ->
-          Logger.error (fun f -> f "RWLock: Reader process failed");
-          state.reader_count <- pred reader_count;
-          loop
-            { state with status = Reading (Reader_set.remove fell_pid readers) }
-      | Writing writer when Pid.equal writer fell_pid ->
-          Logger.error (fun f -> f "RWLock: Writer process failed");
-          check_queues state
-      | _ ->
-          Logger.error (fun f -> f "RWLock failed to demonitor all processes");
-          loop state)
+  | _ ->
+      Logger.error (fun f -> f "RWLock received invalid unlock");
+      send pid @@ Failed `not_owner;
+      loop state
+
+and handle_proc_down ({ reader_count; status; _ } as state) fell_pid =
+  match status with
+  | Reading readers when Pid_set.mem fell_pid readers ->
+      Logger.error (fun f -> f "RWLock: Reader process failed");
+      state.reader_count <- pred reader_count;
+      loop { state with status = Reading (Pid_set.remove fell_pid readers) }
+  | Writing writer when Pid.equal writer fell_pid ->
+      Logger.error (fun f -> f "RWLock: Writer process failed");
+      check_queues state
+  | _ ->
+      Logger.error (fun f -> f "RWLock failed to demonitor all processes");
+      loop state
 
 and check_queues ({ write_queue; read_queue; _ } as state) =
   if Lf_queue.is_empty write_queue then
@@ -106,11 +123,11 @@ and grant_readers state =
         monitor reader;
         send reader Lock_accepted;
         state.reader_count <- succ reader_count;
-        let read_set = Reader_set.add reader read_set in
+        let read_set = Pid_set.add reader read_set in
         grant state read_set
     | None -> loop { state with status = Reading read_set }
   in
-  grant state (Reader_set.of_list [])
+  grant state (Pid_set.of_list [])
 
 (* API internals *)
 
@@ -123,16 +140,22 @@ let selector = function
 let wait_lock { process; _ } msg =
   monitor process;
   send process msg;
-  match[@warning "-8"] receive ~selector () with
-  | Lock_accepted -> Ok ()
-  | Failed reason -> Error reason
-  | Monitor (Process_down _) -> Error `process_died
+  let rec get_msg () =
+    match[@warning "-8"] receive ~selector () with
+    | Lock_accepted -> Ok ()
+    | Locked -> get_msg ()
+    | Unlock_accepted -> Error `invalid_message
+    | Failed reason -> Error reason
+    | Monitor (Process_down _) -> Error `process_died
+  in
+  get_msg ()
 
 let try_wait_lock { process; _ } msg =
   monitor process;
   send process @@ msg;
   match[@warning "-8"] receive_any () with
   | Lock_accepted -> Ok ()
+  | Unlock_accepted -> Error `invalid_message
   | Locked -> Error `locked
   | Failed reason -> Error reason
   | Monitor (Process_down _) -> Error `process_died
@@ -145,6 +168,7 @@ let unlock { process; _ } =
       Ok ()
   | Failed reason -> Error reason
   | Monitor (Process_down _) -> Error `process_died
+  | _ -> Error `invalid_message
 
 let init_state () =
   let read_queue = Lf_queue.create () in

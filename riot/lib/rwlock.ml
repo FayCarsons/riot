@@ -149,7 +149,7 @@ let read handle =
   Ok res
 
 let try_read handle =
-  let* _ = wait_lock handle @@ Try_read (self ()) in
+  let* _ = try_wait_lock handle @@ Read (self ()) in
   let res = Mutex.clone handle.inner in
   let* _ = unlock handle in
   Ok res
@@ -160,7 +160,7 @@ let write handle fn =
   unlock handle
 
 let try_write handle fn =
-  let* _ = wait_lock handle @@ Try_write (self ()) in
+  let* _ = try_wait_lock handle @@ Write (self ()) in
   handle.inner <- fn handle.inner;
   unlock handle
 

@@ -16,6 +16,8 @@ and state = Reading of Reader_set.t | Writing of Pid.t | Unlocked
 type 'a t = { mutable inner : 'a; process : Pid.t }
 type error = [ `not_owner | `multiple_unlocks | `locked | `process_died ]
 
+(* Process *)
+
 type Message.t +=
   | Read of Pid.t
   | Locked
@@ -110,6 +112,8 @@ and grant_readers state =
   in
   grant state (Reader_set.of_list [])
 
+(* API internals *)
+
 let selector = function
   | (Lock_accepted | Unlock_accepted | Failed _ | Monitor (Process_down _)) as
     msg ->
@@ -142,6 +146,19 @@ let unlock { process; _ } =
   | Failed reason -> Error reason
   | Monitor (Process_down _) -> Error `process_died
 
+let init_state () =
+  let read_queue = Lf_queue.create () in
+  let write_queue = Lf_queue.create () in
+  let status = Unlocked in
+  let reader_count = 0 in
+  { reader_count; status; write_queue; read_queue }
+
+(* API *)
+
+let create inner =
+  let process = spawn_link @@ fun () -> loop @@ init_state () in
+  { inner; process }
+
 let read handle =
   let* _ = wait_lock handle @@ Read (self ()) in
   let res = Mutex.clone handle.inner in
@@ -165,4 +182,4 @@ let try_write handle fn =
   unlock handle
 
 let unsafe_read { inner; _ } = inner
-let unsafe_write handle value = handle.inner <- value
+let unsafe_write value handle = handle.inner <- value

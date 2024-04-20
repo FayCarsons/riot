@@ -928,6 +928,19 @@ module Mutex : sig
   val unsafe_set : 'a t -> 'a -> unit
 end
 
+module Rwlock : sig
+  type 'a t
+  type error
+
+  val create : 'a -> 'a t
+  val read : 'a t -> ('a, error) result
+  val try_read : 'a t -> ('a, error) result
+  val write : 'a t -> ('a -> 'a) -> (unit, error) result
+  val try_write : 'a t -> ('a -> 'a) -> (unit, error) result
+  val unsafe_write : 'a -> 'a t -> unit
+  val unsafe_read : 'a t -> 'a
+end
+
 module Stream : sig
   type 'v t = 'v Seq.t
 

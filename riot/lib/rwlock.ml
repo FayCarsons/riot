@@ -1,7 +1,7 @@
 open Global
 open Util
 open Process.Messages
-module Pid_set = Set.Make (Pid)
+module Set = Set.Make (Pid)
 
 type internal = {
   mutable reader_count : int;
@@ -11,7 +11,7 @@ type internal = {
   write_queue : Pid.t Lf_queue.t;
 }
 
-and state = Reading of Pid_set.t | Writing of Pid.t | Unlocked
+and state = Reading of Set.t | Writing of Pid.t | Unlocked
 
 type 'a t = { mutable inner : 'a; process : Pid.t }
 
@@ -22,7 +22,6 @@ type error =
 
 type Message.t +=
   | Read of Pid.t
-  | Locked
   | Lock_accepted
   | Write of Pid.t
   | Try of [ `read | `write ] * Pid.t
@@ -44,13 +43,13 @@ and handle_read ({ reader_count; read_queue; status; _ } as state) reader =
       monitor reader;
       send reader Lock_accepted;
       state.reader_count <- succ reader_count;
-      let status = Reading (Pid_set.add reader readers) in
+      let status = Reading (Set.add reader readers) in
       loop { state with status }
   | Unlocked ->
       monitor reader;
       send reader Lock_accepted;
       state.reader_count <- succ reader_count;
-      let readers = Pid_set.of_list [ reader ] in
+      let readers = Set.of_list [ reader ] in
       loop { state with status = Reading readers }
   | Writing _ ->
       Lf_queue.push read_queue reader;
@@ -67,21 +66,22 @@ and handle_write ({ write_queue; status; _ } as state) writer =
       loop state
 
 and handle_try ({ status; reader_count; _ } as state) pid = function
-  | `read when reader_count = 0 && status <> Unlocked -> send pid @@ Locked
+  | `read when reader_count = 0 && status <> Unlocked ->
+      send pid @@ Failed `locked
   | `read -> handle_read state pid
-  | `write when status <> Unlocked -> send pid @@ Locked
+  | `write when status <> Unlocked -> send pid @@ Failed `locked
   | `write -> handle_write state pid
 
 and handle_unlock ({ reader_count; status; _ } as state) pid =
   match status with
-  | Reading readers when Pid_set.mem pid readers ->
+  | Reading readers when Set.mem pid readers ->
       send pid Unlock_accepted;
       demonitor pid;
       state.reader_count <- pred reader_count;
       if state.reader_count = 0 then
         check_queues { state with status = Unlocked }
       else
-        let status = Reading (Pid_set.remove pid readers) in
+        let status = Reading (Set.remove pid readers) in
         loop { state with status }
   | Writing current when Pid.equal pid current ->
       send pid Unlock_accepted;
@@ -98,10 +98,10 @@ and handle_unlock ({ reader_count; status; _ } as state) pid =
 
 and handle_proc_down ({ reader_count; status; _ } as state) fell_pid =
   match status with
-  | Reading readers when Pid_set.mem fell_pid readers ->
+  | Reading readers when Set.mem fell_pid readers ->
       Logger.error (fun f -> f "RWLock: Reader process failed");
       state.reader_count <- pred reader_count;
-      loop { state with status = Reading (Pid_set.remove fell_pid readers) }
+      loop { state with status = Reading (Set.remove fell_pid readers) }
   | Writing writer when Pid.equal writer fell_pid ->
       Logger.error (fun f -> f "RWLock: Writer process failed");
       check_queues state
@@ -123,11 +123,11 @@ and grant_readers state =
         monitor reader;
         send reader Lock_accepted;
         state.reader_count <- succ reader_count;
-        let read_set = Pid_set.add reader read_set in
+        let read_set = Set.add reader read_set in
         grant state read_set
     | None -> loop { state with status = Reading read_set }
   in
-  grant state (Pid_set.of_list [])
+  grant state (Set.of_list [])
 
 (* API internals *)
 
@@ -140,29 +140,24 @@ let selector = function
 let wait_lock { process; _ } msg =
   monitor process;
   send process msg;
-  let rec get_msg () =
-    match[@warning "-8"] receive ~selector () with
-    | Lock_accepted -> Ok ()
-    | Locked -> get_msg ()
-    | Unlock_accepted -> Error `invalid_message
-    | Failed reason -> Error reason
-    | Monitor (Process_down _) -> Error `process_died
-  in
-  get_msg ()
-
-let try_wait_lock { process; _ } msg =
-  monitor process;
-  send process @@ msg;
-  match[@warning "-8"] receive_any () with
+  match receive ~selector () with
   | Lock_accepted -> Ok ()
-  | Unlock_accepted -> Error `invalid_message
-  | Locked -> Error `locked
   | Failed reason -> Error reason
   | Monitor (Process_down _) -> Error `process_died
+  | _ -> Error `invalid_message
+
+let try_wait_lock { process; _ } mode =
+  monitor process;
+  send process @@ Try (mode, self ());
+  match receive ~selector () with
+  | Lock_accepted -> Ok ()
+  | Failed reason -> Error reason
+  | Monitor (Process_down _) -> Error `process_died
+  | _ -> Error `invalid_message
 
 let unlock { process; _ } =
   send process @@ Unlock (self ());
-  match[@warning "-8"] receive ~selector () with
+  match receive ~selector () with
   | Unlock_accepted ->
       demonitor process;
       Ok ()
@@ -177,6 +172,11 @@ let init_state () =
   let reader_count = 0 in
   { reader_count; status; write_queue; read_queue }
 
+let clone (inner : 'a) : 'a =
+  let open Marshal in
+  let ser = to_bytes inner [ Closures; No_sharing ] in
+  from_bytes ser 0
+
 (* API *)
 
 let create inner =
@@ -185,13 +185,13 @@ let create inner =
 
 let read handle =
   let* _ = wait_lock handle @@ Read (self ()) in
-  let res = Mutex.clone handle.inner in
+  let inner = clone handle.inner in
   let* _ = unlock handle in
-  Ok res
+  Ok inner
 
 let try_read handle =
-  let* _ = try_wait_lock handle @@ Read (self ()) in
-  let res = Mutex.clone handle.inner in
+  let* _ = try_wait_lock handle `read in
+  let res = clone handle.inner in
   let* _ = unlock handle in
   Ok res
 
@@ -201,7 +201,7 @@ let write handle fn =
   unlock handle
 
 let try_write handle fn =
-  let* _ = try_wait_lock handle @@ Write (self ()) in
+  let* _ = try_wait_lock handle `write in
   handle.inner <- fn handle.inner;
   unlock handle
 

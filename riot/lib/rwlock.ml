@@ -195,6 +195,11 @@ let try_read handle =
   let* _ = unlock handle in
   Ok res
 
+let read_iter handle fn =
+  let* _ = wait_lock handle @@ Read (self ()) in
+  fn handle.inner;
+  unlock handle
+
 let write handle fn =
   let* _ = wait_lock handle @@ Write (self ()) in
   handle.inner <- fn handle.inner;
@@ -203,6 +208,11 @@ let write handle fn =
 let try_write handle fn =
   let* _ = try_wait_lock handle `write in
   handle.inner <- fn handle.inner;
+  unlock handle
+
+let write_iter handle fn =
+  let* _ = wait_lock handle @@ Write (self ()) in
+  fn handle.inner;
   unlock handle
 
 let unsafe_read { inner; _ } = inner
